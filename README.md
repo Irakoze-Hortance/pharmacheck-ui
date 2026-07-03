@@ -10,8 +10,9 @@
 ## Installation
 
 ### 1. Clone the repo
-git clone https://github.com/Irakoze-Hortance/capstone-ml.git
-cd pharmacheck
+git clone https://github.com/Irakoze-Hortance/pharmacheck-ui.git
+
+cd pharmacheck-ui
 
 ### 2. Backend (FastAPI)
 cd capstone-ml
