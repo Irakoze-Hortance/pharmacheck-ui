@@ -17,10 +17,10 @@ cd pharmacheck-ui
 ```
 
 ### 2. Backend (FastAPI)
-1. cd capstone-ml
-2. ip install -r requirements.txt
-3. cp .env.example .env        # fill in MONGO_URI
-4. uvicorn main:app --reload
+- cd capstone-ml
+- pip install -r requirements.txt
+- cp .env.example .env        # fill in MONGO_URI
+- uvicorn main:app --reload
 
 ### 3. Frontend (Next.js Dashboard)
 cd pharmacheck
