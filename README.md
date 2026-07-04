@@ -9,33 +9,41 @@
 
 ## Installation
 
-### 1. Clone the repo
+### A. Frontend (Next.js Dashboard)
+
 git clone https://github.com/Irakoze-Hortance/pharmacheck-ui.git
 
 ```
 cd pharmacheck-ui
 ```
-
-### 2. Backend (FastAPI)
-- cd capstone-ml
-- pip install -r requirements.txt
-- cp .env.example .env        # fill in MONGO_URI
-- uvicorn main:app --reload
-
-### 3. Frontend (Next.js Dashboard)
-cd pharmacheck
+```
 npm install
+```
+```
 npm run dev
+```
 
-### 4. Android App
-- Open /android in Android Studio
-- Add google-services.json if applicable
-- Place tflite model in app/src/main/assets/
-- Run on device or emulator (API 26+)
+### B. Backend (FastAPI)
+git clone https://github.com/Irakoze-Hortance/-capstone-ml.git
+
+```
+cd capstone-ml
+```
+```
+pip install -r requirements.txt
+```
+```
+cp .env.example .env        # fill in MONGO_URI
+```
+```
+uvicorn main:app --reload
+```
+
+
 
 ## Live Demo
 - API: https://capstone-ml-lqpp.onrender.com/docs
 
 ## Demo Video
-[5-minute walkthrough — YouTube/Drive link]
+[https://drive.google.com/file/d/1caXLQStGNHWVRkTFRRfgre5yaR-cXJdx/view?usp=drive_link]
 

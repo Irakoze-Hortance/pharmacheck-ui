@@ -38,6 +38,24 @@ function shortFilename(name: string): string {
   return name.replace(/\.rf\.[a-f0-9]+/, '').replace(/\.(jpg|png|jpeg)$/i, '');
 }
 
+function getFeedItemKey(item: FeedItem): string {
+  return item._id ?? `${item.observation_id}|${new Date(item.timestamp).toISOString()}|${item.query_filename}|${item.inspector_id ?? ''}`;
+}
+
+function dedupeFeed(items: FeedItem[]): FeedItem[] {
+  const seen = new Set<string>();
+
+  return items.filter((item) => {
+    const key = getFeedItemKey(item);
+    if (seen.has(key)) {
+      return false;
+    }
+
+    seen.add(key);
+    return true;
+  });
+}
+
 const VERDICT_STYLE = {
   authentic:   { icon: '#22C55E', bg: 'rgba(34,197,94,0.08)',  border: 'rgba(34,197,94,0.2)'  },
   counterfeit: { icon: '#EF4444', bg: 'rgba(239,68,68,0.08)',  border: 'rgba(239,68,68,0.2)'  },
@@ -73,12 +91,13 @@ export default function NetworkSection() {
         const msg = JSON.parse(e.data);
 
         if (msg.type === 'initial') {
-          setFeed(msg.data ?? []);
+          setFeed(dedupeFeed(msg.data ?? []));
         }
 
         if (msg.type === 'change' && msg.data) {
           setFeed(prev => {
-            const without = prev.filter(v => v.observation_id !== msg.data.observation_id);
+            const incomingKey = getFeedItemKey(msg.data);
+            const without = prev.filter(v => getFeedItemKey(v) !== incomingKey);
             return [msg.data, ...without].slice(0, 20);
           });
         }
@@ -245,19 +264,20 @@ export default function NetworkSection() {
 
             {/* Feed rows — capped at FEED_LIMIT most recent */}
             <div className="flex flex-col gap-2">
-              {recentFeed.map((item, i) => {
+              {recentFeed.map((item) => {
                 const style  = VERDICT_STYLE[item.verdict];
-                const isOpen = expanded === item.observation_id;
+                const itemKey = getFeedItemKey(item);
+                const isOpen = expanded === itemKey;
 
                 return (
                   <div
-                    key={item.observation_id ?? i}
+                    key={itemKey}
                     className="feed-item rounded-xl overflow-hidden"
                     style={{ border: `1px solid ${style.border}`, backgroundColor: style.bg }}
                   >
                     {/* Row summary */}
                     <button
-                      onClick={() => setExpanded(isOpen ? null : item.observation_id)}
+                      onClick={() => setExpanded(isOpen ? null : itemKey)}
                       className="w-full text-left px-4 py-3 flex items-center justify-between gap-3"
                       style={{ background: 'transparent', border: 'none', cursor: 'pointer' }}
                     >
