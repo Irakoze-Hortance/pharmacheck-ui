@@ -1,7 +1,7 @@
 'use client';
 
-import { useState, useRef } from 'react';
-import { Camera, FileImage, AlertCircle, CheckCircle, Loader2, ChevronDown, ChevronUp, Zap, BarChart2 } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import { Camera, FileImage, AlertCircle, CheckCircle, Loader2, ChevronDown, ChevronUp, Zap, BarChart2, Clock } from 'lucide-react';
 
 const BACKEND = 'https://capstone-ml-lqpp.onrender.com';
 
@@ -25,21 +25,67 @@ interface PredictResult {
   top_5_matches: TopMatch[];
 }
 
+interface PendingCapture {
+  id: string;
+  fileName: string;
+  preview: string;
+  createdAt: string;
+  reason: 'offline' | 'network-error';
+}
+
+const PENDING_CAPTURE_KEY = 'pharmacheck.pendingCaptures';
+
+function loadPendingCaptures(): PendingCapture[] {
+  if (typeof window === 'undefined') return [];
+
+  try {
+    const raw = window.localStorage.getItem(PENDING_CAPTURE_KEY);
+    return raw ? JSON.parse(raw) as PendingCapture[] : [];
+  } catch {
+    return [];
+  }
+}
+
+function savePendingCapture(capture: PendingCapture) {
+  if (typeof window === 'undefined') return;
+
+  const current = loadPendingCaptures();
+  const next = [capture, ...current].slice(0, 25);
+  window.localStorage.setItem(PENDING_CAPTURE_KEY, JSON.stringify(next));
+}
+
 function shortName(filename: string) {
   return filename.replace(/\.rf\.[a-f0-9]+/, '').replace(/\.(jpg|png|jpeg)$/i, '');
 }
 
 export default function HeroSection() {
   const [dragOver, setDragOver]     = useState(false);
-  const [status, setStatus]         = useState<'idle' | 'loading' | 'done' | 'error'>('idle');
+  const [status, setStatus]         = useState<'idle' | 'loading' | 'pending' | 'done' | 'error'>('idle');
   const [result, setResult]         = useState<PredictResult | null>(null);
   const [errorMsg, setErrorMsg]     = useState('');
   const [showMatches, setShowMatches] = useState(false);
   const [preview, setPreview]       = useState<string | null>(null);
+  const [pendingCapture, setPendingCapture] = useState<PendingCapture | null>(null);
+  const [online, setOnline]         = useState(true);
   const fileRef                     = useRef<HTMLInputElement>(null);
+  const lastFileRef                 = useRef<File | null>(null);
+
+  useEffect(() => {
+    const syncOnlineState = () => setOnline(navigator.onLine);
+
+    syncOnlineState();
+    window.addEventListener('online', syncOnlineState);
+    window.addEventListener('offline', syncOnlineState);
+
+    return () => {
+      window.removeEventListener('online', syncOnlineState);
+      window.removeEventListener('offline', syncOnlineState);
+    };
+  }, []);
 
   const handleFile = async (file: File) => {
     if (!file.type.startsWith('image/')) return;
+    lastFileRef.current = file;
 
     // Show image preview
     const reader = new FileReader();
@@ -50,8 +96,36 @@ export default function HeroSection() {
     setResult(null);
     setShowMatches(false);
     setErrorMsg('');
+    setPendingCapture(null);
+
+    const queueCapture = (reason: PendingCapture['reason'], previewData: string) => {
+      const pending = {
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        fileName: file.name,
+        preview: previewData,
+        createdAt: new Date().toISOString(),
+        reason,
+      } satisfies PendingCapture;
+
+      savePendingCapture(pending);
+      setPendingCapture(pending);
+      setPreview(previewData);
+      setStatus('pending');
+    };
 
     try {
+      if (!online || navigator.onLine === false) {
+        const previewData = await new Promise<string>((resolve, reject) => {
+          const offlineReader = new FileReader();
+          offlineReader.onload = (e) => resolve(e.target?.result as string);
+          offlineReader.onerror = () => reject(new Error('Unable to create offline preview'));
+          offlineReader.readAsDataURL(file);
+        });
+
+        queueCapture('offline', previewData);
+        return;
+      }
+
       const form = new FormData();
       form.append('file', file);
 
@@ -69,8 +143,27 @@ export default function HeroSection() {
       setResult(data);
       setStatus('done');
     } catch (err) {
-      setErrorMsg(String(err));
+      const message = String(err);
+      if (message.includes('Failed to fetch') || message.includes('fetch') || !navigator.onLine) {
+        const previewData = await new Promise<string>((resolve, reject) => {
+          const offlineReader = new FileReader();
+          offlineReader.onload = (e) => resolve(e.target?.result as string);
+          offlineReader.onerror = () => reject(new Error('Unable to create offline preview'));
+          offlineReader.readAsDataURL(file);
+        });
+
+        queueCapture('network-error', previewData);
+        return;
+      }
+
+      setErrorMsg(message);
       setStatus('error');
+    }
+  };
+
+  const retryPendingCapture = () => {
+    if (lastFileRef.current) {
+      void handleFile(lastFileRef.current);
     }
   };
 
@@ -86,6 +179,7 @@ export default function HeroSection() {
     setStatus('idle');
     setResult(null);
     setPreview(null);
+    setPendingCapture(null);
     setShowMatches(false);
     setErrorMsg('');
     if (fileRef.current) fileRef.current.value = '';
@@ -207,6 +301,47 @@ export default function HeroSection() {
                   <p className="text-sm" style={{ color: 'var(--muted)' }}>
                     Sending to PharmaCheck API
                   </p>
+                </div>
+              )}
+
+              {/* PENDING */}
+              {status === 'pending' && pendingCapture && (
+                <div className="flex flex-col items-center gap-3 w-full">
+                  {pendingCapture.preview && (
+                    <img src={pendingCapture.preview} alt="pending preview" className="w-20 h-20 object-cover rounded-xl" />
+                  )}
+                  <div className="flex items-center gap-2 px-3 py-1.5 rounded-full" style={{ backgroundColor: 'rgba(14,165,233,0.08)', color: '#0EA5E9', border: '1px solid rgba(14,165,233,0.18)' }}>
+                    <Clock size={14} />
+                    <span className="text-xs font-semibold uppercase tracking-widest">Pending</span>
+                  </div>
+                  <p className="font-semibold text-lg m-0" style={{ color: 'var(--navy)', fontFamily: 'Sora, sans-serif' }}>
+                    Photo saved offline
+                  </p>
+                  <p className="text-sm text-center px-4 m-0" style={{ color: 'var(--muted)' }}>
+                    {pendingCapture.reason === 'offline'
+                      ? 'Your scan was captured without a connection and will be ready to sync once you are back online.'
+                      : 'The scan was captured, but the verification API could not be reached. It has been queued as pending.'}
+                  </p>
+                  <p className="text-xs m-0" style={{ color: 'var(--muted)' }}>
+                    {pendingCapture.fileName}
+                  </p>
+                  <div className="flex flex-wrap items-center justify-center gap-2 pt-1">
+                    <button
+                      className="text-xs px-4 py-1.5 rounded-lg border"
+                      style={{ borderColor: 'var(--muted)', color: 'var(--slate)', cursor: 'pointer', background: 'transparent' }}
+                      onClick={retryPendingCapture}
+                      disabled={!online}
+                    >
+                      {online ? 'Retry verification' : 'Reconnect to retry'}
+                    </button>
+                    <button
+                      className="text-xs px-4 py-1.5 rounded-lg border"
+                      style={{ borderColor: 'var(--muted)', color: 'var(--slate)', cursor: 'pointer', background: 'transparent' }}
+                      onClick={reset}
+                    >
+                      Capture Another
+                    </button>
+                  </div>
                 </div>
               )}
 

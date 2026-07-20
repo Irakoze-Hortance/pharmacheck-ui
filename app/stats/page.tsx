@@ -246,7 +246,7 @@ export default function StatsPage() {
   const last7  = dailyBuckets.slice(-7).reduce((s, b) => s + b.total, 0);
   const peakDay = dailyBuckets.reduce(
     (best, b) => (b.total > best.total ? b : best),
-    dailyBuckets[0] ?? { label: '—', total: 0, authentic: 0, counterfeit: 0, key: '', counterfeit: 0 },
+    dailyBuckets[0] ?? { label: '—', total: 0, authentic: 0, counterfeit: 0, key: '',  },
   );
 
   const handleExport = (format: 'csv' | 'json') =>
