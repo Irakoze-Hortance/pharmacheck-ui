@@ -4,6 +4,7 @@ export const dynamic = 'force-dynamic';
 
 const BACKEND = process.env.BACKEND_URL || 'https://capstone-ml-lqpp.onrender.com';
 
+
 export async function GET() {
   try {
     const res = await fetch(`${BACKEND}/history`, {
