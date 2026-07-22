@@ -5,6 +5,18 @@ import { Camera, FileImage, AlertCircle, CheckCircle, Loader2, ChevronDown, Chev
 
 const BACKEND = 'https://capstone-ml-lqpp.onrender.com';
 
+// ---------------------------------------------------------------------------
+// Types — mirror app/models/prediction.py (MatchResult) exactly.
+// Probabilities are nested, not flat, and several fields (best_match_labels,
+// status, scope_note, best_match_split) exist on the real response that the
+// old frontend type never accounted for.
+// ---------------------------------------------------------------------------
+
+interface ClassProbability {
+  authentic: number;
+  counterfeit: number;
+}
+
 interface TopMatch {
   filename: string;
   split: string;
@@ -12,23 +24,27 @@ interface TopMatch {
   similarity_score: number;
 }
 
-interface PredictResult {
+interface MatchResult {
   observation_id: string;
-  verdict: 'authentic' | 'counterfeit';
-  confidence: number;
-  prob_authentic: number;
-  prob_counterfeit: number;
-  similarity_score: number;
-  inference_ms: number;
-  model_version: string;
+  timestamp: string;
+  query_filename: string;
   best_match_filename: string;
+  best_match_split: string;
+  best_match_labels: { authentic: number; counterfeit: number };
+  similarity_score: number;
   top_5_matches: TopMatch[];
+  verdict: 'authentic' | 'counterfeit' | null;
+  confidence: number | null;
+  probabilities: ClassProbability | null;
+  inference_ms: number | null;
+  status: 'completed' | 'pending';
+  scope_note: string;
 }
 
 interface PendingCapture {
   id: string;
   fileName: string;
-  preview: string;
+  base64: string; // full data URI — needed to actually replay the request later
   createdAt: string;
   reason: 'offline' | 'network-error';
 }
@@ -37,101 +53,152 @@ const PENDING_CAPTURE_KEY = 'pharmacheck.pendingCaptures';
 
 function loadPendingCaptures(): PendingCapture[] {
   if (typeof window === 'undefined') return [];
-
   try {
     const raw = window.localStorage.getItem(PENDING_CAPTURE_KEY);
-    return raw ? JSON.parse(raw) as PendingCapture[] : [];
+    if (!raw) return [];
+    const migrated = migratePendingCaptures(JSON.parse(raw));
+    savePendingCaptures(migrated); // persist the migrated shape immediately
+    return migrated;
   } catch {
     return [];
   }
 }
 
-function savePendingCapture(capture: PendingCapture) {
-  if (typeof window === 'undefined') return;
 
-  const current = loadPendingCaptures();
-  const next = [capture, ...current].slice(0, 25);
-  window.localStorage.setItem(PENDING_CAPTURE_KEY, JSON.stringify(next));
+
+function savePendingCaptures(list: PendingCapture[]) {
+  if (typeof window === 'undefined') return;
+  window.localStorage.setItem(PENDING_CAPTURE_KEY, JSON.stringify(list.slice(0, 25)));
 }
+
+function readFileAsBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => resolve(e.target?.result as string);
+    reader.onerror = () => reject(new Error('Unable to read file'));
+    reader.readAsDataURL(file);
+  });
+}
+
+function migratePendingCaptures(raw: unknown[]): PendingCapture[] {
+  return raw
+    .map((item) => {
+      const c = item as Record<string, unknown>;
+      const base64 = (c.base64 as string) ?? (c.preview as string);
+      if (!base64) return null; // unrecoverable — drop it
+      return {
+        id: (c.id as string) ?? `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        fileName: (c.fileName as string) ?? 'unknown',
+        base64,
+        createdAt: (c.createdAt as string) ?? new Date().toISOString(),
+        reason: (c.reason as PendingCapture['reason']) ?? 'network-error',
+      };
+    })
+    .filter((c): c is PendingCapture => c !== null);
+}
+
 
 function shortName(filename: string) {
   return filename.replace(/\.rf\.[a-f0-9]+/, '').replace(/\.(jpg|png|jpeg)$/i, '');
 }
 
 export default function HeroSection() {
-  const [dragOver, setDragOver]     = useState(false);
-  const [status, setStatus]         = useState<'idle' | 'loading' | 'pending' | 'done' | 'error'>('idle');
-  const [result, setResult]         = useState<PredictResult | null>(null);
-  const [errorMsg, setErrorMsg]     = useState('');
+  const [dragOver, setDragOver] = useState(false);
+  const [status, setStatus] = useState<'idle' | 'loading' | 'pending' | 'done' | 'error'>('idle');
+  const [result, setResult] = useState<MatchResult | null>(null);
+  const [errorMsg, setErrorMsg] = useState('');
   const [showMatches, setShowMatches] = useState(false);
-  const [preview, setPreview]       = useState<string | null>(null);
+  const [preview, setPreview] = useState<string | null>(null);
   const [pendingCapture, setPendingCapture] = useState<PendingCapture | null>(null);
-  const [online, setOnline]         = useState(true);
-  const fileRef                     = useRef<HTMLInputElement>(null);
-  const lastFileRef                 = useRef<File | null>(null);
+  const [online, setOnline] = useState(true);
+  const fileRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     const syncOnlineState = () => setOnline(navigator.onLine);
-
     syncOnlineState();
     window.addEventListener('online', syncOnlineState);
     window.addEventListener('offline', syncOnlineState);
-
     return () => {
       window.removeEventListener('online', syncOnlineState);
       window.removeEventListener('offline', syncOnlineState);
     };
   }, []);
 
-  const handleFile = async (file: File) => {
-    if (!file.type.startsWith('image/')) return;
-    lastFileRef.current = file;
+  // Auto-sync queued captures whenever connectivity returns.
+  useEffect(() => {
+    if (!online) return;
+    const queued = loadPendingCaptures();
+    if (queued.length === 0) return;
 
-    // Show image preview
-    const reader = new FileReader();
-    reader.onload = (e) => setPreview(e.target?.result as string);
-    reader.readAsDataURL(file);
+    (async () => {
+      const remaining: PendingCapture[] = [];
+      for (const capture of queued) {
+        try {
+          await submitBase64(capture.base64, capture.fileName, { silent: true });
+        } catch {
+          remaining.push(capture); // keep it queued if the retry itself fails
+        }
+      }
+      savePendingCaptures(remaining);
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [online]);
 
-    setStatus('loading');
-    setResult(null);
-    setShowMatches(false);
-    setErrorMsg('');
-    setPendingCapture(null);
-
-    const queueCapture = (reason: PendingCapture['reason'], previewData: string) => {
-      const pending = {
-        id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        fileName: file.name,
-        preview: previewData,
-        createdAt: new Date().toISOString(),
-        reason,
-      } satisfies PendingCapture;
-
-      savePendingCapture(pending);
-      setPendingCapture(pending);
-      setPreview(previewData);
-      setStatus('pending');
+  const queueCapture = (reason: PendingCapture['reason'], fileName: string, base64: string) => {
+    const capture: PendingCapture = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      fileName,
+      base64,
+      createdAt: new Date().toISOString(),
+      reason,
     };
+    savePendingCaptures([capture, ...loadPendingCaptures()]);
+    setPendingCapture(capture);
+    setPreview(base64);
+    setStatus('pending');
+  };
+
+  /**
+   * Single call path for both the initial submit and any later retry —
+   * this is the "same flow" fix: everything goes through /camera/predict
+   * with a base64 payload, since that's the only format that can be
+   * persisted to localStorage for offline queueing.
+   */
+  const submitBase64 = async (
+    base64: string,
+    fileName: string,
+    opts: { silent?: boolean } = {},
+  ) => {
+    if (!opts.silent) {
+      setStatus('loading');
+      setResult(null);
+      setShowMatches(false);
+      setErrorMsg('');
+      setPendingCapture(null);
+      setPreview(base64);
+    }
+
+    if (!navigator.onLine) {
+      queueCapture('offline', fileName, base64);
+      return;
+    }
+     if (!base64) {
+    // Fail loudly here instead of sending a request missing image_base64.
+    if (opts.silent) throw new Error('Missing image data for queued capture');
+    setErrorMsg('Something went wrong reading that image — please try again.');
+    setStatus('error');
+    return;
+  }
 
     try {
-      if (!online || navigator.onLine === false) {
-        const previewData = await new Promise<string>((resolve, reject) => {
-          const offlineReader = new FileReader();
-          offlineReader.onload = (e) => resolve(e.target?.result as string);
-          offlineReader.onerror = () => reject(new Error('Unable to create offline preview'));
-          offlineReader.readAsDataURL(file);
-        });
-
-        queueCapture('offline', previewData);
-        return;
-      }
-
-      const form = new FormData();
-      form.append('file', file);
-
-      const res = await fetch(`${BACKEND}/predict`, {
+      const res = await fetch(`${BACKEND}/camera/predict`, {
         method: 'POST',
-        body: form,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          image_base64: base64,
+          filename: fileName,
+          offline_capture: false,
+        }),
       });
 
       if (!res.ok) {
@@ -139,31 +206,32 @@ export default function HeroSection() {
         throw new Error(`API error ${res.status}: ${err}`);
       }
 
-      const data: PredictResult = await res.json();
+      const data: MatchResult = await res.json();
       setResult(data);
+      setPreview(base64);
       setStatus('done');
     } catch (err) {
-      const message = String(err);
-      if (message.includes('Failed to fetch') || message.includes('fetch') || !navigator.onLine) {
-        const previewData = await new Promise<string>((resolve, reject) => {
-          const offlineReader = new FileReader();
-          offlineReader.onload = (e) => resolve(e.target?.result as string);
-          offlineReader.onerror = () => reject(new Error('Unable to create offline preview'));
-          offlineReader.readAsDataURL(file);
-        });
+      if (opts.silent) throw err; // let the caller decide to re-queue
 
-        queueCapture('network-error', previewData);
+      const message = String(err);
+      if (message.includes('fetch') || !navigator.onLine) {
+        queueCapture('network-error', fileName, base64);
         return;
       }
-
       setErrorMsg(message);
       setStatus('error');
     }
   };
 
+  const handleFile = async (file: File) => {
+    if (!file.type.startsWith('image/')) return;
+    const base64 = await readFileAsBase64(file);
+    await submitBase64(base64, file.name);
+  };
+
   const retryPendingCapture = () => {
-    if (lastFileRef.current) {
-      void handleFile(lastFileRef.current);
+    if (pendingCapture) {
+      void submitBase64(pendingCapture.base64, pendingCapture.fileName);
     }
   };
 
@@ -171,7 +239,7 @@ export default function HeroSection() {
     e.preventDefault();
     setDragOver(false);
     const file = e.dataTransfer.files[0];
-    if (file) handleFile(file);
+    if (file) void handleFile(file);
   };
 
   const reset = (e: React.MouseEvent) => {
@@ -261,7 +329,7 @@ export default function HeroSection() {
                 type="file"
                 accept="image/*"
                 className="hidden"
-                onChange={(e) => { if (e.target.files?.[0]) handleFile(e.target.files[0]); }}
+                onChange={(e) => { if (e.target.files?.[0]) void handleFile(e.target.files[0]); }}
               />
 
               {/* IDLE */}
@@ -307,8 +375,8 @@ export default function HeroSection() {
               {/* PENDING */}
               {status === 'pending' && pendingCapture && (
                 <div className="flex flex-col items-center gap-3 w-full">
-                  {pendingCapture.preview && (
-                    <img src={pendingCapture.preview} alt="pending preview" className="w-20 h-20 object-cover rounded-xl" />
+                  {pendingCapture.base64 && (
+                    <img src={pendingCapture.base64} alt="pending preview" className="w-20 h-20 object-cover rounded-xl" />
                   )}
                   <div className="flex items-center gap-2 px-3 py-1.5 rounded-full" style={{ backgroundColor: 'rgba(14,165,233,0.08)', color: '#0EA5E9', border: '1px solid rgba(14,165,233,0.18)' }}>
                     <Clock size={14} />
@@ -319,8 +387,8 @@ export default function HeroSection() {
                   </p>
                   <p className="text-sm text-center px-4 m-0" style={{ color: 'var(--muted)' }}>
                     {pendingCapture.reason === 'offline'
-                      ? 'Your scan was captured without a connection and will be ready to sync once you are back online.'
-                      : 'The scan was captured, but the verification API could not be reached. It has been queued as pending.'}
+                      ? 'Your scan was captured without a connection and will sync automatically once you are back online.'
+                      : 'The scan was captured, but the verification API could not be reached. It will retry automatically, or you can retry now.'}
                   </p>
                   <p className="text-xs m-0" style={{ color: 'var(--muted)' }}>
                     {pendingCapture.fileName}
@@ -366,12 +434,10 @@ export default function HeroSection() {
               {/* DONE */}
               {status === 'done' && result && (
                 <div className="flex flex-col items-center gap-3 w-full" onClick={(e) => e.stopPropagation()}>
-                  {/* Preview thumbnail */}
                   {preview && (
                     <img src={preview} alt="scanned" className="w-20 h-20 object-cover rounded-xl" />
                   )}
 
-                  {/* Verdict */}
                   {isAuthentic
                     ? <CheckCircle size={40} style={{ color: '#22C55E' }} />
                     : <AlertCircle size={40} style={{ color: '#EF4444' }} />
@@ -383,19 +449,23 @@ export default function HeroSection() {
                     {isAuthentic ? 'Authentic' : 'Counterfeit Detected'}
                   </p>
 
-
-                  {/* Meta row */}
+                  {/* Meta row — reads from the nested `probabilities` /
+                      `inference_ms` fields, matching the real MatchResult
+                      shape rather than flat prob_authentic/prob_counterfeit */}
                   <div className="flex items-center gap-4 text-xs mt-1" style={{ color: 'var(--muted)' }}>
-                    <span className="flex items-center gap-1">
-                      <Zap size={11} />{result.inference_ms.toFixed(0)}ms
-                    </span>
+                    {result.inference_ms != null && (
+                      <span className="flex items-center gap-1">
+                        <Zap size={11} />{result.inference_ms.toFixed(0)}ms
+                      </span>
+                    )}
                     <span className="flex items-center gap-1">
                       <BarChart2 size={11} />{(result.similarity_score * 100).toFixed(2)}% similarity
                     </span>
-                    <span>{result.model_version}</span>
+                    {result.confidence != null && (
+                      <span>{(result.confidence * 100).toFixed(1)}% confidence</span>
+                    )}
                   </div>
 
-                  {/* Top 5 matches toggle */}
                   {result.top_5_matches?.length > 0 && (
                     <div className="w-full mt-1">
                       <button
